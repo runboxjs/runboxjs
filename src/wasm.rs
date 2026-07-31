@@ -227,6 +227,9 @@ impl RunboxInstance {
             )
         });
 
+        // Safety net: flush any pending journal rows (e.g. future record paths).
+        let _ = crate::history_store::persist_pending(&mut self.journal, &mut self.store);
+
         match result {
             Ok(r) => serde_json::to_string(&r).unwrap_or_default(),
             Err(e) => serde_json::json!({
@@ -256,18 +259,12 @@ impl RunboxInstance {
         self.journal.session_id().to_string()
     }
 
-    /// Persiste todas las entradas pendientes del journal al store (IndexedDB en WASM, SQLite en native).
+    /// Persiste todas las entradas pendientes del journal al store (localStorage en WASM, SQLite en native).
     /// Retorna JSON: { persisted: count }
     pub fn journal_persist(&mut self) -> String {
-        let pending = self.journal.drain_pending();
-        let count = pending.len();
-        if count > 0 {
-            match self.store.save_journal_entries(&pending) {
-                Ok(()) => serde_json::json!({ "persisted": count }).to_string(),
-                Err(e) => serde_json::json!({ "persisted": 0, "error": e }).to_string(),
-            }
-        } else {
-            serde_json::json!({ "persisted": 0 }).to_string()
+        match crate::history_store::persist_pending(&mut self.journal, &mut self.store) {
+            Ok(count) => serde_json::json!({ "persisted": count }).to_string(),
+            Err(e) => serde_json::json!({ "persisted": 0, "error": e }).to_string(),
         }
     }
 

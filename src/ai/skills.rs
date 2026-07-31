@@ -57,7 +57,7 @@ pub fn dispatch_with_preview(
         "explain_project" => skill_explain_project(call, vfs),
         "refactor_code" => skill_refactor_code(call, vfs),
         "generate_tests" => skill_generate_tests(call, vfs),
-        "agent_memo" => skill_agent_memo(call, journal),
+        "agent_memo" => skill_agent_memo(call, journal, store),
         "get_agent_journal" => skill_get_agent_journal(call, journal),
         "search_history" => skill_search_history(call, journal, store),
         other => Err(RunboxError::Runtime(format!("unknown skill: {other}"))),
@@ -408,6 +408,7 @@ fn skill_generate_tests(call: &ToolCall, _vfs: &Vfs) -> crate::error::Result<Val
 fn skill_agent_memo(
     call: &ToolCall,
     journal: Option<&mut AgentJournal>,
+    store: Option<&mut Box<dyn HistoryStore>>,
 ) -> crate::error::Result<Value> {
     let tool = str_arg(&call.arguments, "tool")?;
     let reason = str_arg(&call.arguments, "reason")?;
@@ -427,7 +428,19 @@ fn skill_agent_memo(
     match journal {
         Some(j) => {
             let id = j.record(tool, reason, result_summary, files_affected, 0);
-            Ok(json!({ "recorded": true, "id": id }))
+            let mut persisted = 0usize;
+            let mut persist_error = None;
+            if let Some(s) = store {
+                match crate::history_store::persist_pending(j, s) {
+                    Ok(n) => persisted = n,
+                    Err(e) => persist_error = Some(e),
+                }
+            }
+            let mut out = json!({ "recorded": true, "id": id, "persisted": persisted });
+            if let Some(e) = persist_error {
+                out["persist_error"] = json!(e);
+            }
+            Ok(out)
         }
         None => Err(RunboxError::Runtime(
             "agent journal not available in this context".into(),

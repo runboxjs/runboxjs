@@ -1,5 +1,6 @@
-use crate::agent_journal::JournalEntry;
+use crate::agent_journal::{JournalEntry, entries_to_ctx_jsonl};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 /// Query para búsqueda en el historial
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,7 +46,8 @@ pub struct SearchOutput {
 pub trait HistoryStore {
     fn save_journal_entry(&mut self, entry: &JournalEntry) -> Result<(), String>;
     fn save_journal_entries(&mut self, entries: &[JournalEntry]) -> Result<(), String>;
-    fn get_journal_entries(&self, since_id: u64, limit: usize) -> Result<Vec<JournalEntry>, String>;
+    fn get_journal_entries(&self, since_id: u64, limit: usize)
+    -> Result<Vec<JournalEntry>, String>;
     fn search(&self, query: &SearchQuery) -> Result<SearchOutput, String>;
     fn export_jsonl(&self) -> Result<String, String>;
     fn clear(&mut self) -> Result<(), String>;
@@ -61,7 +63,11 @@ impl HistoryStore for NullStore {
     fn save_journal_entries(&mut self, _entries: &[JournalEntry]) -> Result<(), String> {
         Ok(())
     }
-    fn get_journal_entries(&self, _since_id: u64, _limit: usize) -> Result<Vec<JournalEntry>, String> {
+    fn get_journal_entries(
+        &self,
+        _since_id: u64,
+        _limit: usize,
+    ) -> Result<Vec<JournalEntry>, String> {
         Ok(vec![])
     }
     fn search(&self, _query: &SearchQuery) -> Result<SearchOutput, String> {
@@ -79,12 +85,28 @@ impl HistoryStore for NullStore {
     }
 }
 
+/// Ruta por defecto del historial SQLite nativo.
+/// Override: `RUNBOX_HISTORY_DB=/path/to/history.sqlite`
+pub fn default_history_db_path() -> PathBuf {
+    if let Ok(custom) = std::env::var("RUNBOX_HISTORY_DB") {
+        if !custom.trim().is_empty() {
+            return PathBuf::from(custom);
+        }
+    }
+
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".into());
+
+    PathBuf::from(home).join(".runbox").join("history.sqlite")
+}
+
 // ── Backend nativo: SQLite ──────────────────────────────────────────────────
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_sqlite {
     use super::*;
-    use rusqlite::{params, Connection};
+    use rusqlite::{Connection, params};
 
     pub struct SqliteStore {
         conn: Connection,
@@ -92,6 +114,12 @@ pub mod native_sqlite {
 
     impl SqliteStore {
         pub fn new(path: &str) -> Result<Self, String> {
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("failed to create history dir: {e}"))?;
+                }
+            }
             let conn = Connection::open(path).map_err(|e| format!("failed to open DB: {e}"))?;
             let store = Self { conn };
             store.init_schema()?;
@@ -113,17 +141,40 @@ pub mod native_sqlite {
         }
 
         fn init_schema(&self) -> Result<(), String> {
+            // Si existe el schema viejo (PK = id), resetear para soportar multi-sesión.
+            let has_entry_id = self
+                .conn
+                .prepare("SELECT entry_id FROM runbox_journal LIMIT 0")
+                .is_ok();
+            let table_exists = self
+                .conn
+                .prepare(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runbox_journal' LIMIT 1",
+                )
+                .and_then(|mut stmt| stmt.exists([]))
+                .unwrap_or(false);
+
+            if table_exists && !has_entry_id {
+                self.conn
+                    .execute_batch(
+                        "DROP TABLE IF EXISTS journal_fts; DROP TABLE IF EXISTS runbox_journal;",
+                    )
+                    .map_err(|e| format!("schema migrate error: {e}"))?;
+            }
+
             self.conn
                 .execute_batch(
                     "
                 CREATE TABLE IF NOT EXISTS runbox_journal (
-                    id INTEGER PRIMARY KEY,
+                    pk INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entry_id INTEGER NOT NULL,
                     session_id TEXT NOT NULL,
                     timestamp_ms INTEGER NOT NULL,
                     tool TEXT NOT NULL,
                     reason TEXT NOT NULL,
                     result_summary TEXT NOT NULL DEFAULT '',
-                    files_affected TEXT NOT NULL DEFAULT '[]'
+                    files_affected TEXT NOT NULL DEFAULT '[]',
+                    UNIQUE(session_id, entry_id)
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_journal_session ON runbox_journal(session_id);
@@ -133,15 +184,71 @@ pub mod native_sqlite {
                 CREATE VIRTUAL TABLE IF NOT EXISTS journal_fts USING fts5(
                     tool, reason, result_summary, files_affected,
                     content='runbox_journal',
-                    content_rowid='id'
+                    content_rowid='pk'
                 );
                 ",
                 )
                 .map_err(|e| format!("schema init error: {e}"))?;
 
             self.conn
-                .execute("INSERT INTO journal_fts(journal_fts) VALUES ('rebuild')", [])
+                .execute(
+                    "INSERT INTO journal_fts(journal_fts) VALUES ('rebuild')",
+                    [],
+                )
                 .ok();
+            Ok(())
+        }
+
+        fn upsert_entry(conn: &Connection, entry: &JournalEntry) -> Result<(), String> {
+            let files_json =
+                serde_json::to_string(&entry.files_affected).unwrap_or_else(|_| "[]".to_string());
+
+            conn.execute(
+                "INSERT INTO runbox_journal (entry_id, session_id, timestamp_ms, tool, reason, result_summary, files_affected)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(session_id, entry_id) DO UPDATE SET
+                    timestamp_ms=excluded.timestamp_ms,
+                    tool=excluded.tool,
+                    reason=excluded.reason,
+                    result_summary=excluded.result_summary,
+                    files_affected=excluded.files_affected",
+                params![
+                    entry.id as i64,
+                    entry.session_id,
+                    entry.timestamp_ms as i64,
+                    entry.tool,
+                    entry.reason,
+                    entry.result_summary,
+                    files_json,
+                ],
+            )
+            .map_err(|e| format!("insert error: {e}"))?;
+
+            let pk: i64 = conn
+                .query_row(
+                    "SELECT pk FROM runbox_journal WHERE session_id = ?1 AND entry_id = ?2",
+                    params![entry.session_id, entry.id as i64],
+                    |row| row.get(0),
+                )
+                .map_err(|e| format!("pk lookup error: {e}"))?;
+
+            let _ = conn.execute(
+                "INSERT INTO journal_fts(journal_fts, rowid) VALUES('delete', ?1)",
+                params![pk],
+            );
+            conn.execute(
+                "INSERT INTO journal_fts(rowid, tool, reason, result_summary, files_affected)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    pk,
+                    entry.tool,
+                    entry.reason,
+                    entry.result_summary,
+                    files_json,
+                ],
+            )
+            .map_err(|e| format!("fts insert error: {e}"))?;
+
             Ok(())
         }
 
@@ -149,52 +256,20 @@ pub mod native_sqlite {
             let files_str: String = row.get(6)?;
             let files: Vec<String> = serde_json::from_str(&files_str).unwrap_or_default();
             Ok(JournalEntry {
-                id: row.get(0)?,
-                timestamp_ms: row.get(2)?,
+                id: row.get::<_, i64>(0)? as u64,
+                session_id: row.get(1)?,
+                timestamp_ms: row.get::<_, i64>(2)? as u64,
                 tool: row.get(3)?,
                 reason: row.get(4)?,
                 result_summary: row.get(5)?,
                 files_affected: files,
-                session_id: row.get(1)?,
             })
         }
     }
 
     impl HistoryStore for SqliteStore {
         fn save_journal_entry(&mut self, entry: &JournalEntry) -> Result<(), String> {
-            let files_json =
-                serde_json::to_string(&entry.files_affected).unwrap_or_else(|_| "[]".to_string());
-            self.conn
-                .execute(
-                    "INSERT OR REPLACE INTO runbox_journal (id, session_id, timestamp_ms, tool, reason, result_summary, files_affected)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
-                        entry.id,
-                        entry.session_id,
-                        entry.timestamp_ms,
-                        entry.tool,
-                        entry.reason,
-                        entry.result_summary,
-                        files_json,
-                    ],
-                )
-                .map_err(|e| format!("insert error: {e}"))?;
-
-            // Update FTS
-            self.conn
-                .execute(
-                    "INSERT INTO journal_fts(rowid, tool, reason, result_summary, files_affected)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        entry.id,
-                        entry.tool,
-                        entry.reason,
-                        entry.result_summary,
-                        files_json,
-                    ],
-                )
-                .ok();
-            Ok(())
+            Self::upsert_entry(&self.conn, entry)
         }
 
         fn save_journal_entries(&mut self, entries: &[JournalEntry]) -> Result<(), String> {
@@ -206,51 +281,27 @@ pub mod native_sqlite {
                 .transaction()
                 .map_err(|e| format!("tx begin error: {e}"))?;
             for entry in entries {
-                let files_json =
-                    serde_json::to_string(&entry.files_affected).unwrap_or_else(|_| "[]".to_string());
-                tx.execute(
-                    "INSERT OR REPLACE INTO runbox_journal (id, session_id, timestamp_ms, tool, reason, result_summary, files_affected)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
-                        entry.id,
-                        entry.session_id,
-                        entry.timestamp_ms,
-                        entry.tool,
-                        entry.reason,
-                        entry.result_summary,
-                        files_json,
-                    ],
-                )
-                .map_err(|e| format!("insert error: {e}"))?;
-
-                tx.execute(
-                    "INSERT INTO journal_fts(rowid, tool, reason, result_summary, files_affected)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        entry.id,
-                        entry.tool,
-                        entry.reason,
-                        entry.result_summary,
-                        files_json,
-                    ],
-                )
-                .ok();
+                Self::upsert_entry(&tx, entry)?;
             }
             tx.commit().map_err(|e| format!("tx commit error: {e}"))?;
             Ok(())
         }
 
-        fn get_journal_entries(&self, since_id: u64, limit: usize) -> Result<Vec<JournalEntry>, String> {
+        fn get_journal_entries(
+            &self,
+            since_id: u64,
+            limit: usize,
+        ) -> Result<Vec<JournalEntry>, String> {
             let mut stmt = self
                 .conn
                 .prepare(
-                    "SELECT id, session_id, timestamp_ms, tool, reason, result_summary, files_affected
-                     FROM runbox_journal WHERE id > ?1 ORDER BY id ASC LIMIT ?2",
+                    "SELECT entry_id, session_id, timestamp_ms, tool, reason, result_summary, files_affected
+                     FROM runbox_journal WHERE entry_id > ?1 ORDER BY timestamp_ms ASC, entry_id ASC LIMIT ?2",
                 )
                 .map_err(|e| format!("prepare error: {e}"))?;
 
             let rows = stmt
-                .query_map(params![since_id, limit as i64], Self::row_to_entry)
+                .query_map(params![since_id as i64, limit as i64], Self::row_to_entry)
                 .map_err(|e| format!("query error: {e}"))?;
 
             let mut entries = vec![];
@@ -263,7 +314,6 @@ pub mod native_sqlite {
         fn search(&self, query: &SearchQuery) -> Result<SearchOutput, String> {
             let limit = query.limit.min(200);
 
-            // Si hay texto de búsqueda, usar FTS5
             if let Some(ref text) = query.text {
                 if text.is_empty() {
                     return Ok(SearchOutput {
@@ -300,10 +350,10 @@ pub mod native_sqlite {
                     .join(" OR ");
 
                 let sql = format!(
-                    "SELECT j.id, j.session_id, j.timestamp_ms, j.tool, j.reason, j.result_summary, j.files_affected,
+                    "SELECT j.entry_id, j.session_id, j.timestamp_ms, j.tool, j.reason, j.result_summary, j.files_affected,
                             rank
                      FROM journal_fts f
-                     JOIN runbox_journal j ON j.id = f.rowid
+                     JOIN runbox_journal j ON j.pk = f.rowid
                      WHERE journal_fts MATCH ?1
                      {}
                      ORDER BY rank ASC
@@ -318,17 +368,7 @@ pub mod native_sqlite {
 
                 let rows = stmt
                     .query_map(params![fts_query, limit as i64], |row| {
-                        let files_str: String = row.get(6)?;
-                        let files: Vec<String> = serde_json::from_str(&files_str).unwrap_or_default();
-                        let entry = JournalEntry {
-                            id: row.get(0)?,
-                            timestamp_ms: row.get(2)?,
-                            tool: row.get(3)?,
-                            reason: row.get(4)?,
-                            result_summary: row.get(5)?,
-                            files_affected: files,
-                            session_id: row.get(1)?,
-                        };
+                        let entry = Self::row_to_entry(row)?;
                         let score: f64 = 1.0 - (row.get::<_, f64>(7).unwrap_or(0.0) / 100.0);
                         Ok((entry, score))
                     })
@@ -337,7 +377,10 @@ pub mod native_sqlite {
                 let mut results = vec![];
                 for row in rows {
                     let (entry, score) = row.map_err(|e| format!("row error: {e}"))?;
-                    let snippet = crate::history_store::build_snippet_inner(&entry, query.text.as_deref().unwrap_or(""));
+                    let snippet = crate::history_store::build_snippet_inner(
+                        &entry,
+                        query.text.as_deref().unwrap_or(""),
+                    );
                     results.push(SearchResult {
                         entry,
                         score: score.max(0.0).min(1.0),
@@ -354,7 +397,6 @@ pub mod native_sqlite {
                 });
             }
 
-            // Sin texto: filtrar por tool / file / session_id
             let mut conditions = vec!["1=1".to_string()];
             let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![];
 
@@ -372,13 +414,13 @@ pub mod native_sqlite {
             }
             if let Some(sid) = query.since_id {
                 param_values.push(Box::new(sid as i64));
-                conditions.push(format!("id > ?{}", param_values.len()));
+                conditions.push(format!("entry_id > ?{}", param_values.len()));
             }
 
             param_values.push(Box::new(limit as i64));
 
             let sql = format!(
-                "SELECT id, session_id, timestamp_ms, tool, reason, result_summary, files_affected
+                "SELECT entry_id, session_id, timestamp_ms, tool, reason, result_summary, files_affected
                  FROM runbox_journal
                  WHERE {}
                  ORDER BY timestamp_ms DESC
@@ -426,8 +468,8 @@ pub mod native_sqlite {
             let mut stmt = self
                 .conn
                 .prepare(
-                    "SELECT id, session_id, timestamp_ms, tool, reason, result_summary, files_affected
-                     FROM runbox_journal ORDER BY timestamp_ms ASC",
+                    "SELECT entry_id, session_id, timestamp_ms, tool, reason, result_summary, files_affected
+                     FROM runbox_journal ORDER BY timestamp_ms ASC, entry_id ASC",
                 )
                 .map_err(|e| format!("prepare error: {e}"))?;
 
@@ -435,12 +477,11 @@ pub mod native_sqlite {
                 .query_map([], Self::row_to_entry)
                 .map_err(|e| format!("query error: {e}"))?;
 
-            let mut lines = vec![];
+            let mut entries = vec![];
             for row in rows {
-                let entry = row.map_err(|e| format!("row error: {e}"))?;
-                lines.push(crate::history_store::entry_to_jsonl(&entry));
+                entries.push(row.map_err(|e| format!("row error: {e}"))?);
             }
-            Ok(lines.join("\n"))
+            Ok(entries_to_ctx_jsonl(&entries))
         }
 
         fn clear(&mut self) -> Result<(), String> {
@@ -469,6 +510,60 @@ pub mod native_sqlite {
         }
         filters.join(" ")
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn persist_two_sessions_without_id_collision() {
+            let mut store = SqliteStore::in_memory().unwrap();
+            let a = JournalEntry {
+                id: 0,
+                timestamp_ms: 100,
+                tool: "write_file".into(),
+                reason: "session a".into(),
+                result_summary: "ok".into(),
+                files_affected: vec!["/a.ts".into()],
+                session_id: "runbox-aaa".into(),
+            };
+            let b = JournalEntry {
+                id: 0,
+                timestamp_ms: 200,
+                tool: "write_file".into(),
+                reason: "session b".into(),
+                result_summary: "ok".into(),
+                files_affected: vec!["/b.ts".into()],
+                session_id: "runbox-bbb".into(),
+            };
+            store.save_journal_entry(&a).unwrap();
+            store.save_journal_entry(&b).unwrap();
+
+            let out = store
+                .search(&SearchQuery {
+                    text: Some("session".into()),
+                    limit: 10,
+                    ..Default::default()
+                })
+                .unwrap();
+            assert_eq!(out.results.len(), 2);
+
+            let jsonl = store.export_jsonl().unwrap();
+            assert!(jsonl.contains("ctx-history-jsonl-v1"));
+            assert!(jsonl.contains("runbox-aaa"));
+            assert!(jsonl.contains("runbox-bbb"));
+            assert!(jsonl.contains("\"record_type\":\"file_touch\""));
+        }
+
+        #[test]
+        fn default_db_path_under_runbox_dir() {
+            let path = default_history_db_path();
+            assert!(
+                path.ends_with("history.sqlite")
+                    || path.to_string_lossy().contains("history.sqlite")
+            );
+        }
+    }
 }
 
 pub(crate) fn build_snippet_inner(entry: &JournalEntry, query: &str) -> String {
@@ -488,20 +583,10 @@ pub(crate) fn build_snippet_inner(entry: &JournalEntry, query: &str) -> String {
     entry.reason.chars().take(200).collect()
 }
 
+/// Single-entry helper; prefer `entries_to_ctx_jsonl` for full corpora.
+#[allow(dead_code)]
 pub(crate) fn entry_to_jsonl(entry: &JournalEntry) -> String {
-    serde_json::json!({
-        "type": "event",
-        "version": 1,
-        "provider": "runbox",
-        "session_id": entry.session_id,
-        "event_id": format!("runbox-ev-{}", entry.id),
-        "timestamp_ms": entry.timestamp_ms,
-        "tool": entry.tool,
-        "reason": entry.reason,
-        "result_summary": entry.result_summary,
-        "files_affected": entry.files_affected,
-    })
-    .to_string()
+    entries_to_ctx_jsonl(std::slice::from_ref(entry))
 }
 
 // ── Backend WASM: localStorage bridge ───────────────────────────────────────
@@ -549,7 +634,15 @@ pub mod wasm_storage {
     impl HistoryStore for LocalStorageStore {
         fn save_journal_entry(&mut self, entry: &JournalEntry) -> Result<(), String> {
             let mut all = Self::read_all()?;
-            all.push(entry.clone());
+            // Upsert by (session_id, id) to avoid duplicates across persists.
+            if let Some(existing) = all
+                .iter_mut()
+                .find(|e| e.session_id == entry.session_id && e.id == entry.id)
+            {
+                *existing = entry.clone();
+            } else {
+                all.push(entry.clone());
+            }
             Self::write_all(&all)
         }
 
@@ -558,7 +651,16 @@ pub mod wasm_storage {
                 return Ok(());
             }
             let mut all = Self::read_all()?;
-            all.extend_from_slice(entries);
+            for entry in entries {
+                if let Some(existing) = all
+                    .iter_mut()
+                    .find(|e| e.session_id == entry.session_id && e.id == entry.id)
+                {
+                    *existing = entry.clone();
+                } else {
+                    all.push(entry.clone());
+                }
+            }
             Self::write_all(&all)
         }
 
@@ -672,8 +774,7 @@ pub mod wasm_storage {
 
         fn export_jsonl(&self) -> Result<String, String> {
             let all = Self::read_all()?;
-            let lines: Vec<String> = all.iter().map(crate::history_store::entry_to_jsonl).collect();
-            Ok(lines.join("\n"))
+            Ok(entries_to_ctx_jsonl(&all))
         }
 
         fn clear(&mut self) -> Result<(), String> {
@@ -685,7 +786,20 @@ pub mod wasm_storage {
     }
 }
 
-/// Crea el HistoryStore apropiado según la plataforma
+/// Persiste entradas pendientes del journal al store.
+pub fn persist_pending(
+    journal: &mut crate::agent_journal::AgentJournal,
+    store: &mut Box<dyn HistoryStore>,
+) -> Result<usize, String> {
+    let pending = journal.drain_pending();
+    let count = pending.len();
+    if count > 0 {
+        store.save_journal_entries(&pending)?;
+    }
+    Ok(count)
+}
+
+/// Crea el HistoryStore apropiado según la plataforma.
 pub fn create_store() -> Box<dyn HistoryStore> {
     #[cfg(target_arch = "wasm32")]
     {
@@ -694,9 +808,19 @@ pub fn create_store() -> Box<dyn HistoryStore> {
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        match crate::history_store::native_sqlite::SqliteStore::in_memory() {
+        let path = default_history_db_path();
+        let path_str = path.to_string_lossy().to_string();
+        match crate::history_store::native_sqlite::SqliteStore::new(&path_str) {
             Ok(store) => Box::new(store),
-            Err(_) => Box::new(NullStore),
+            Err(err) => {
+                tracing::warn!(
+                    "failed to open history db at {path_str}: {err}; falling back to in-memory"
+                );
+                match crate::history_store::native_sqlite::SqliteStore::in_memory() {
+                    Ok(store) => Box::new(store),
+                    Err(_) => Box::new(NullStore),
+                }
+            }
         }
     }
 }

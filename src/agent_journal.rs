@@ -4,14 +4,22 @@
 /// y un resumen del resultado. Esto permite que otro agente (o el futuro tú)
 /// entienda el historial de intenciones, no solo el historial de cambios.
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Source id fijo para export ctx-history-jsonl-v1.
+pub const CTX_SOURCE_ID: &str = "runbox-local";
+/// Provider key para custom import de ctx.
+pub const CTX_PROVIDER_KEY: &str = "runbox";
+/// Formato de fuente declarado en el export.
+pub const CTX_SOURCE_FORMAT: &str = "runbox-journal-v1";
 
 /// Una entrada en el diario del agente.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JournalEntry {
-    /// ID incremental.
+    /// ID incremental dentro de la sesión.
     pub id: u64,
-    /// Timestamp en ms desde el inicio de la sesión.
+    /// Timestamp absoluto en ms (Unix epoch). Si se pasa `0` a `record`, se rellena con now.
     pub timestamp_ms: u64,
     /// Nombre de la tool ejecutada (write_file, exec_command, patch_file, etc.)
     pub tool: String,
@@ -23,6 +31,136 @@ pub struct JournalEntry {
     pub files_affected: Vec<String>,
     /// ID de la sesión a la que pertenece esta entrada.
     pub session_id: String,
+}
+
+/// Unix epoch millis.
+pub fn unix_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn ms_to_rfc3339(ms: u64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms as i64)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| "1970-01-01T00:00:00Z".into())
+}
+
+/// Exporta entradas al formato público `ctx-history-jsonl-v1`.
+pub fn entries_to_ctx_jsonl(entries: &[JournalEntry]) -> String {
+    let mut lines: Vec<String> = Vec::new();
+
+    lines.push(
+        serde_json::json!({
+            "record_type": "manifest",
+            "schema_version": "ctx-history-jsonl-v1",
+            "metadata": { "exporter": "runbox", "source_format": CTX_SOURCE_FORMAT }
+        })
+        .to_string(),
+    );
+
+    lines.push(
+        serde_json::json!({
+            "record_type": "source",
+            "source_id": CTX_SOURCE_ID,
+            "provider_key": CTX_PROVIDER_KEY,
+            "source_format": CTX_SOURCE_FORMAT,
+            "metadata": { "kind": "agent_journal" }
+        })
+        .to_string(),
+    );
+
+    let mut by_session: BTreeMap<&str, Vec<&JournalEntry>> = BTreeMap::new();
+    for entry in entries {
+        by_session
+            .entry(entry.session_id.as_str())
+            .or_default()
+            .push(entry);
+    }
+
+    for (session_id, session_entries) in by_session {
+        let started_ms = session_entries
+            .iter()
+            .map(|e| e.timestamp_ms)
+            .min()
+            .unwrap_or(0);
+        let ended_ms = session_entries
+            .iter()
+            .map(|e| e.timestamp_ms)
+            .max()
+            .unwrap_or(started_ms);
+
+        lines.push(
+            serde_json::json!({
+                "record_type": "session",
+                "source_id": CTX_SOURCE_ID,
+                "session_id": session_id,
+                "native_session_id": session_id,
+                "started_at": ms_to_rfc3339(started_ms),
+                "ended_at": ms_to_rfc3339(ended_ms),
+                "agent_type": "primary",
+                "role_hint": "developer",
+                "is_primary": true,
+                "status": "completed",
+                "metadata": { "provider": CTX_PROVIDER_KEY }
+            })
+            .to_string(),
+        );
+
+        let mut touch_index: u64 = 0;
+        for entry in session_entries {
+            let preview = if entry.reason.len() > 240 {
+                format!("{}…", entry.reason.chars().take(240).collect::<String>())
+            } else {
+                entry.reason.clone()
+            };
+            let occurred_at = ms_to_rfc3339(entry.timestamp_ms);
+
+            lines.push(
+                serde_json::json!({
+                    "record_type": "event",
+                    "source_id": CTX_SOURCE_ID,
+                    "session_id": session_id,
+                    "event_index": entry.id,
+                    "event_id": format!("runbox-ev-{}-{}", session_id, entry.id),
+                    "event_type": "tool_use",
+                    "role": "assistant",
+                    "occurred_at": &occurred_at,
+                    "preview": preview,
+                    "payload": {
+                        "tool": entry.tool,
+                        "reason": entry.reason,
+                        "result_summary": entry.result_summary,
+                        "files_affected": entry.files_affected,
+                    },
+                    "native_cursor": format!("entry:{}", entry.id),
+                    "metadata": { "tool": entry.tool }
+                })
+                .to_string(),
+            );
+
+            for path in &entry.files_affected {
+                lines.push(
+                    serde_json::json!({
+                        "record_type": "file_touch",
+                        "source_id": CTX_SOURCE_ID,
+                        "session_id": session_id,
+                        "touch_index": touch_index,
+                        "event_index": entry.id,
+                        "path": path,
+                        "change_kind": "modified",
+                        "confidence": "high",
+                        "occurred_at": &occurred_at,
+                    })
+                    .to_string(),
+                );
+                touch_index += 1;
+            }
+        }
+    }
+
+    lines.join("\n")
 }
 
 /// Resultado de búsqueda simple (in-memory).
@@ -39,6 +177,7 @@ pub struct AgentJournal {
     capacity: usize,
     next_id: u64,
     session_id: String,
+    session_started_at_ms: u64,
     pending_persist: Vec<JournalEntry>,
 }
 
@@ -51,21 +190,23 @@ impl Default for AgentJournal {
 impl AgentJournal {
     pub fn new(capacity: usize) -> Self {
         let session_id = Self::generate_session_id();
+        let session_started_at_ms = unix_now_ms();
         Self {
             entries: VecDeque::with_capacity(capacity),
             capacity,
             next_id: 0,
             session_id,
+            session_started_at_ms,
             pending_persist: Vec::new(),
         }
     }
 
     fn generate_session_id() -> String {
         use std::hash::{Hash, Hasher};
-        use std::time::SystemTime;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        unix_now_ms().hash(&mut hasher);
         SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
+            .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos()
             .hash(&mut hasher);
@@ -77,7 +218,13 @@ impl AgentJournal {
         &self.session_id
     }
 
+    /// Inicio de sesión en Unix epoch millis.
+    pub fn session_started_at_ms(&self) -> u64 {
+        self.session_started_at_ms
+    }
+
     /// Registra una nueva entrada en el diario.
+    /// Si `timestamp_ms == 0`, usa el reloj del sistema (Unix epoch ms).
     pub fn record(
         &mut self,
         tool: impl Into<String>,
@@ -93,9 +240,15 @@ impl AgentJournal {
             self.entries.pop_front();
         }
 
+        let ts = if timestamp_ms == 0 {
+            unix_now_ms()
+        } else {
+            timestamp_ms
+        };
+
         let entry = JournalEntry {
             id,
-            timestamp_ms,
+            timestamp_ms: ts,
             tool: tool.into(),
             reason: reason.into(),
             result_summary: result_summary.into(),
@@ -133,7 +286,13 @@ impl AgentJournal {
     }
 
     /// Búsqueda full-text sobre las entradas en memoria.
-    pub fn search(&self, query: &str, tool_filter: Option<&str>, file_filter: Option<&str>, limit: usize) -> Vec<JournalSearchMatch> {
+    pub fn search(
+        &self,
+        query: &str,
+        tool_filter: Option<&str>,
+        file_filter: Option<&str>,
+        limit: usize,
+    ) -> Vec<JournalSearchMatch> {
         let lower_query = query.to_lowercase();
         let has_query = !query.is_empty();
         let mut results: Vec<JournalSearchMatch> = vec![];
@@ -197,7 +356,11 @@ impl AgentJournal {
             });
         }
 
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results.truncate(limit);
         results
     }
@@ -207,27 +370,10 @@ impl AgentJournal {
         serde_json::to_string(&self.entries).unwrap_or_default()
     }
 
-    /// Exporta en formato ctx-history-jsonl-v1
+    /// Exporta en formato `ctx-history-jsonl-v1` (importable por `ctx import`).
     pub fn to_jsonl(&self) -> String {
-        self.entries
-            .iter()
-            .map(|entry| {
-                serde_json::json!({
-                    "type": "event",
-                    "version": 1,
-                    "provider": "runbox",
-                    "session_id": format!("runbox-{}", entry.session_id),
-                    "event_id": format!("runbox-ev-{}", entry.id),
-                    "timestamp_ms": entry.timestamp_ms,
-                    "tool": entry.tool,
-                    "reason": entry.reason,
-                    "result_summary": entry.result_summary,
-                    "files_affected": entry.files_affected,
-                })
-                .to_string()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        let entries: Vec<JournalEntry> = self.entries.iter().cloned().collect();
+        entries_to_ctx_jsonl(&entries)
     }
 
     /// Número de entradas actuales.
@@ -325,9 +471,27 @@ mod tests {
     #[test]
     fn search_by_reason() {
         let mut j = AgentJournal::new(50);
-        j.record("write_file", "Add authentication middleware", "written", vec!["/src/auth.ts".into()], 100);
-        j.record("exec_command", "Run database migration", "exit 0", vec![], 200);
-        j.record("write_file", "Fix CSS layout bug in header", "patched", vec!["/src/header.css".into()], 300);
+        j.record(
+            "write_file",
+            "Add authentication middleware",
+            "written",
+            vec!["/src/auth.ts".into()],
+            100,
+        );
+        j.record(
+            "exec_command",
+            "Run database migration",
+            "exit 0",
+            vec![],
+            200,
+        );
+        j.record(
+            "write_file",
+            "Fix CSS layout bug in header",
+            "patched",
+            vec!["/src/header.css".into()],
+            300,
+        );
 
         let results = j.search("migration", None, None, 10);
         assert_eq!(results.len(), 1);
@@ -341,9 +505,21 @@ mod tests {
     #[test]
     fn search_with_filters() {
         let mut j = AgentJournal::new(50);
-        j.record("write_file", "Add login page", "created", vec!["/src/login.tsx".into()], 100);
+        j.record(
+            "write_file",
+            "Add login page",
+            "created",
+            vec!["/src/login.tsx".into()],
+            100,
+        );
         j.record("exec_command", "Install deps", "done", vec![], 200);
-        j.record("write_file", "Fix login bug", "patched", vec!["/src/login.tsx".into()], 300);
+        j.record(
+            "write_file",
+            "Fix login bug",
+            "patched",
+            vec!["/src/login.tsx".into()],
+            300,
+        );
 
         // Filter by tool
         let results = j.search("", Some("exec_command"), None, 10);
@@ -372,12 +548,32 @@ mod tests {
     #[test]
     fn to_jsonl_format() {
         let mut j = AgentJournal::new(10);
-        j.record("write_file", "init project", "done", vec!["/package.json".into()], 100);
+        j.record(
+            "write_file",
+            "init project",
+            "done",
+            vec!["/package.json".into()],
+            1_700_000_000_000,
+        );
 
         let jsonl = j.to_jsonl();
-        assert!(jsonl.contains("\"provider\":\"runbox\""));
+        assert!(jsonl.contains("\"record_type\":\"manifest\""));
+        assert!(jsonl.contains("\"schema_version\":\"ctx-history-jsonl-v1\""));
+        assert!(jsonl.contains("\"record_type\":\"source\""));
+        assert!(jsonl.contains("\"provider_key\":\"runbox\""));
+        assert!(jsonl.contains("\"record_type\":\"session\""));
+        assert!(jsonl.contains("\"record_type\":\"event\""));
+        assert!(jsonl.contains("\"record_type\":\"file_touch\""));
         assert!(jsonl.contains("\"tool\":\"write_file\""));
         assert!(jsonl.contains("\"reason\":\"init project\""));
-        assert!(jsonl.contains("\"type\":\"event\""));
+        assert!(jsonl.contains("/package.json"));
+    }
+
+    #[test]
+    fn record_zero_timestamp_uses_unix_now() {
+        let mut j = AgentJournal::new(10);
+        j.record("t", "r", "ok", vec![], 0);
+        let ts = j.all()[0].timestamp_ms;
+        assert!(ts > 1_000_000_000_000, "expected unix epoch ms, got {ts}");
     }
 }
