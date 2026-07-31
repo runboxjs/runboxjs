@@ -2,7 +2,7 @@
 name = "runbox"
 version = "1.1.2"
 edition = "2024"
-authors = ["RunBox Ecosystem <team@runbox.dev>"]
+authors = ["RunBox Ecosystem <runbox@cordlang.com>"]
 description = "High-performance WASM sandbox and development runtime for the browser."
 repository = "https://github.com/runboxjs/runboxjs"
 license = "MIT"

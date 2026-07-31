@@ -791,7 +791,7 @@ For remote operations (push/clone/fetch), set a token first via `git_set_token()
 
 ```json
 { "name": "exec_command", "arguments": { "command": "git config user.name \"Agent\"" } }
-{ "name": "exec_command", "arguments": { "command": "git config user.email \"agent@runbox.dev\"" } }
+{ "name": "exec_command", "arguments": { "command": "git config user.email \"runbox@cordlang.com\"" } }
 ```
 
 ### Push Protocol

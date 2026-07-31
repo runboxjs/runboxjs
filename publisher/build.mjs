@@ -2,10 +2,20 @@
 /**
  * Build script for runboxjs.
  * Usage: node publisher/build.mjs [--bump patch|minor|major] [--publish]
+ *
+ * Always resolves paths from this file so it works from any cwd.
  */
 
 import { execSync } from 'child_process';
 import { readFileSync, writeFileSync } from 'fs';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const root = join(__dirname, '..');
+const templatePath = join(__dirname, 'pkg-template.json');
+const cargoPath = join(root, 'Cargo.toml');
+const pkgJsonPath = join(root, 'pkg', 'package.json');
 
 function parseSemver(value, source) {
   const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(String(value).trim());
@@ -34,7 +44,7 @@ function parseBumpArg(argv) {
   return null;
 }
 
-const cargoToml = readFileSync('Cargo.toml', 'utf8');
+const cargoToml = readFileSync(cargoPath, 'utf8');
 const cargoMatch = cargoToml.match(/^version\s*=\s*"([^"]+)"/m);
 if (!cargoMatch) {
   console.error('No version found in Cargo.toml');
@@ -45,15 +55,18 @@ const cargoVersion = parseSemver(cargoMatch[1], 'Cargo.toml');
 
 let pkgVersion = null;
 try {
-  const pkgJson = JSON.parse(readFileSync('pkg/package.json', 'utf8'));
+  const pkgJson = JSON.parse(readFileSync(pkgJsonPath, 'utf8'));
   pkgVersion = parseSemver(pkgJson.version, 'pkg/package.json');
 } catch {
   // pkg/package.json may not exist before the first wasm-pack build.
 }
 
-const baseVersion = pkgVersion && compareSemver(pkgVersion, cargoVersion) > 0
-  ? pkgVersion
-  : cargoVersion;
+// Prefer Cargo as source of truth over a stale wasm-pack stub in pkg/.
+// Only use pkg version if it is strictly higher than Cargo (manual edit case).
+const baseVersion =
+  pkgVersion && compareSemver(pkgVersion, cargoVersion) > 0
+    ? pkgVersion
+    : cargoVersion;
 
 let [major, minor, patch] = baseVersion;
 
@@ -79,7 +92,7 @@ const nextVersion = [major, minor, patch];
 
 if (compareSemver(nextVersion, cargoVersion) !== 0) {
   const updated = cargoToml.replace(/^(version\s*=\s*)"[^"]+"/m, `$1"${version}"`);
-  writeFileSync('Cargo.toml', updated);
+  writeFileSync(cargoPath, updated);
   if (bumpArg) {
     console.log(`Version bumped -> ${version}`);
   } else {
@@ -90,15 +103,21 @@ if (compareSemver(nextVersion, cargoVersion) !== 0) {
 }
 
 console.log('Building WASM...');
-execSync('wasm-pack build --target web --release', { stdio: 'inherit' });
+execSync('wasm-pack build --target web --release', {
+  stdio: 'inherit',
+  cwd: root,
+});
 
-const template = JSON.parse(readFileSync('pkg-template.json', 'utf8'));
+const template = JSON.parse(readFileSync(templatePath, 'utf8'));
 template.version = version;
-writeFileSync('pkg/package.json', `${JSON.stringify(template, null, 2)}\n`);
+writeFileSync(pkgJsonPath, `${JSON.stringify(template, null, 2)}\n`);
 console.log(`pkg/package.json -> runboxjs@${version}`);
 
 if (process.argv.includes('--publish')) {
   console.log('Publishing to npm...');
-  execSync('npm publish --access public', { stdio: 'inherit', cwd: 'pkg' });
+  execSync('npm publish --access public', {
+    stdio: 'inherit',
+    cwd: join(root, 'pkg'),
+  });
   console.log(`runboxjs@${version} published`);
 }
