@@ -88,10 +88,10 @@ impl HistoryStore for NullStore {
 /// Ruta por defecto del historial SQLite nativo.
 /// Override: `RUNBOX_HISTORY_DB=/path/to/history.sqlite`
 pub fn default_history_db_path() -> PathBuf {
-    if let Ok(custom) = std::env::var("RUNBOX_HISTORY_DB") {
-        if !custom.trim().is_empty() {
-            return PathBuf::from(custom);
-        }
+    if let Ok(custom) = std::env::var("RUNBOX_HISTORY_DB")
+        && !custom.trim().is_empty()
+    {
+        return PathBuf::from(custom);
     }
 
     let home = std::env::var("USERPROFILE")
@@ -114,11 +114,11 @@ pub mod native_sqlite {
 
     impl SqliteStore {
         pub fn new(path: &str) -> Result<Self, String> {
-            if let Some(parent) = std::path::Path::new(path).parent() {
-                if !parent.as_os_str().is_empty() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|e| format!("failed to create history dir: {e}"))?;
-                }
+            if let Some(parent) = std::path::Path::new(path).parent()
+                && !parent.as_os_str().is_empty()
+            {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("failed to create history dir: {e}"))?;
             }
             let conn = Connection::open(path).map_err(|e| format!("failed to open DB: {e}"))?;
             let store = Self { conn };
@@ -383,7 +383,7 @@ pub mod native_sqlite {
                     );
                     results.push(SearchResult {
                         entry,
-                        score: score.max(0.0).min(1.0),
+                        score: score.clamp(0.0, 1.0),
                         snippet,
                         matched_fields: vec!["reason".to_string()],
                     });

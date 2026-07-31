@@ -299,10 +299,10 @@ impl AgentJournal {
 
         for entry in &self.entries {
             // Filtros
-            if let Some(t) = tool_filter {
-                if !entry.tool.to_lowercase().contains(&t.to_lowercase()) {
-                    continue;
-                }
+            if let Some(t) = tool_filter
+                && !entry.tool.to_lowercase().contains(&t.to_lowercase())
+            {
+                continue;
             }
             if let Some(f) = file_filter {
                 let all_files = entry.files_affected.join(" ").to_lowercase();
