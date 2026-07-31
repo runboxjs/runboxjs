@@ -26,23 +26,22 @@
   "sideEffects": ["./runbox.js"],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/owellandry/runbox.git"
+    "url": "git+https://github.com/runboxjs/runboxjs.git"
   },
-  "homepage": "https://github.com/owellandry/runbox#readme",
+  "homepage": "https://github.com/runboxjs/runboxjs#readme",
   "bugs": {
-    "url": "https://github.com/owellandry/runbox/issues",
-    "email": "owellpolanco@gmail.com"
+    "url": "https://github.com/runboxjs/runboxjs/issues"
   },
   "author": {
-    "name": "owellpolanco",
-    "email": "owellpolanco@gmail.com",
-    "url": "https://github.com/owellandry/runbox"
+    "name": "RunBox Ecosystem",
+    "email": "team@runbox.dev",
+    "url": "https://github.com/runboxjs"
   },
   "license": "MIT",
   "engines": { "node": ">=16.0.0" },
   "funding": {
     "type": "github",
-    "url": "https://github.com/owellandry/runbox"
+    "url": "https://github.com/runboxjs"
   },
   "publishConfig": {
     "access": "public",

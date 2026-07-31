@@ -8,7 +8,7 @@
 
 - **npm package:** [`runboxjs`](https://www.npmjs.com/package/runboxjs)
 - **Rust crate source:** `runbox`
-- **Current version:** `0.3.8`
+- **Current version:** `1.1.2`
 
 ---
 

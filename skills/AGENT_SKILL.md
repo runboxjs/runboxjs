@@ -1,6 +1,6 @@
 # RunBox Agent Skill Guide — Complete Reference
 
-> **Version**: 0.3.9 | **Crate**: `runbox` | **Edition**: Rust 2024 | **License**: MIT
+> **Version**: 1.1.2 | **Crate**: `runbox` | **Edition**: Rust 2024 | **License**: MIT
 >
 > This document is the single source of truth for any AI agent integrating with RunBox.
 > It covers every API, every command, every runtime, every pattern, and every edge case.
