@@ -1,7 +1,7 @@
 # RunboxJS npm Publish Guide
 
 This project publishes the JavaScript package as `runboxjs` from `runbox/pkg`.
-The recommended flow is the scripted build/publish pipeline in `build.mjs`.
+The recommended flow is the scripted build/publish pipeline in `publisher/build.mjs`.
 
 ## Prerequisites
 
@@ -13,17 +13,17 @@ The recommended flow is the scripted build/publish pipeline in `build.mjs`.
 ## Version Sources
 
 - Rust crate version: `Cargo.toml`
-- npm package template: `pkg-template.json`
+- npm package template: `publisher/pkg-template.json`
 - generated publish manifest: `pkg/package.json`
 
-`build.mjs` synchronizes versions and writes `pkg/package.json` from `pkg-template.json`.
+`publisher/build.mjs` synchronizes versions and writes `pkg/package.json` from `publisher/pkg-template.json`.
 
 ## Recommended Publish Flow
 
 ### 1. Build (no bump)
 
 ```bash
-node build.mjs
+node publisher/build.mjs
 ```
 
 This will:
@@ -36,21 +36,21 @@ This will:
 ### 2. Bump version (optional)
 
 ```bash
-node build.mjs --bump patch
+node publisher/build.mjs --bump patch
 # or --bump minor / --bump major
 ```
 
 ### 3. Publish
 
 ```bash
-node build.mjs --publish
+node publisher/build.mjs --publish
 ```
 
 Or combine bump + publish in two explicit steps:
 
 ```bash
-node build.mjs --bump patch
-node build.mjs --publish
+node publisher/build.mjs --bump patch
+node publisher/build.mjs --publish
 ```
 
 ## Manual Verification Checklist
@@ -74,7 +74,7 @@ npm pack --dry-run
 
 ### Version goes backwards
 
-Run the scripted flow from repo root (`node build.mjs`) so it compares Cargo/package versions and uses the highest semver baseline.
+Run the scripted flow from repo root (`node publisher/build.mjs`) so it compares Cargo/package versions and uses the highest semver baseline.
 
 ### wasm-pack failure: crate-type must be cdylib
 
@@ -87,7 +87,7 @@ crate-type = ["cdylib", "rlib"]
 
 ### Wrong package name in generated pkg/package.json
 
-`pkg-template.json` is source of truth. Keep `name` as `runboxjs`.
+`publisher/pkg-template.json` is source of truth. Keep `name` as `runboxjs`.
 
 ### npm auth errors
 

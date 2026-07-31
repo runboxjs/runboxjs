@@ -296,10 +296,10 @@ cargo test
 cargo bench
 
 # WASM package build (writes pkg/package.json from template)
-node build.mjs
+node publisher/build.mjs
 
 # Bump version and build
-node build.mjs --bump patch
+node publisher/build.mjs --bump patch
 ```
 
 For detailed build instructions, project setup, and contribution guidelines, see [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md).
@@ -311,8 +311,8 @@ For detailed build instructions, project setup, and contribution guidelines, see
 Use the scripted flow (recommended):
 
 ```bash
-node build.mjs --bump patch
-node build.mjs --publish
+node publisher/build.mjs --bump patch
+node publisher/build.mjs --publish
 ```
 
 Detailed publishing notes: [NPM_PUBLISH.md](./NPM_PUBLISH.md)

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Build script for runboxjs.
- * Usage: node build.mjs [--bump patch|minor|major] [--publish]
+ * Usage: node publisher/build.mjs [--bump patch|minor|major] [--publish]
  */
 
 import { execSync } from 'child_process';

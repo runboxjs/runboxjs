@@ -110,7 +110,7 @@ runbox/
 │   ├── API_REFERENCE.md       # API reference
 │   ├── DEVELOPMENT.md         # This file
 │   └── MCP_GUIDE.md           # MCP server guide
-├── build.mjs                  # WASM build & publish script
+├── publisher/                 # Build & publish scripts
 ├── Cargo.toml                 # Rust dependencies and metadata
 ├── TECHNICAL_DOCS.md          # Legacy technical documentation
 ├── WASM_SETUP.md              # WASM setup guide
@@ -146,7 +146,7 @@ cargo test
 4. **Build WASM package (optional):**
 
 ```bash
-node build.mjs
+node publisher/build.mjs
 ```
 
 ---
@@ -168,11 +168,11 @@ cargo build --release
 
 ### WASM Build
 
-The project uses a custom build script (`build.mjs`) that wraps `wasm-pack`:
+The project uses a custom build script (`publisher/build.mjs`) that wraps `wasm-pack`:
 
 ```bash
 # Standard WASM build
-node build.mjs
+node publisher/build.mjs
 ```
 
 This will:
@@ -184,15 +184,15 @@ This will:
 
 ```bash
 # Bump version and build
-node build.mjs --bump patch    # 0.3.8 -> 0.3.9
-node build.mjs --bump minor    # 0.3.8 -> 0.4.0
-node build.mjs --bump major    # 0.3.8 -> 1.0.0
+node publisher/build.mjs --bump patch    # 0.3.8 -> 0.3.9
+node publisher/build.mjs --bump minor    # 0.3.8 -> 0.4.0
+node publisher/build.mjs --bump major    # 0.3.8 -> 1.0.0
 
 # Publish to npm
-node build.mjs --publish
+node publisher/build.mjs --publish
 
 # Combined: bump + build + publish
-node build.mjs --bump patch --publish
+node publisher/build.mjs --bump patch --publish
 ```
 
 ### Release Profile
@@ -262,7 +262,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | cargo run
 1. Build the WASM package:
 
 ```bash
-node build.mjs
+node publisher/build.mjs
 ```
 
 2. Create a test HTML file or link the `pkg/` directory to a Vite project:
@@ -410,16 +410,16 @@ fn tool_your_tool(&mut self, args: &Value) -> ToolCallResult {
 
 ```bash
 # 1. Bump version in Cargo.toml
-node build.mjs --bump patch
+node publisher/build.mjs --bump patch
 
 # 2. Build WASM package
-node build.mjs
+node publisher/build.mjs
 
 # 3. Verify the pkg/ directory
 ls pkg/
 
 # 4. Publish to npm
-node build.mjs --publish
+node publisher/build.mjs --publish
 # or manually:
 cd pkg && npm publish
 ```
@@ -430,11 +430,11 @@ For detailed publishing notes, see [NPM_PUBLISH.md](../NPM_PUBLISH.md).
 
 ## Release Process
 
-1. **Update version:** Run `node build.mjs --bump <patch|minor|major>`
+1. **Update version:** Run `node publisher/build.mjs --bump <patch|minor|major>`
 2. **Run checks:** `cargo check && cargo test && cargo bench`
-3. **Build WASM:** `node build.mjs`
+3. **Build WASM:** `node publisher/build.mjs`
 4. **Test locally:** Verify the `pkg/` output works in a browser project
-5. **Publish:** `node build.mjs --publish`
+5. **Publish:** `node publisher/build.mjs --publish`
 6. **Tag release:** `git tag v0.X.Y && git push --tags`
 
 ---

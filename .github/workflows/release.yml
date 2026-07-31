@@ -58,7 +58,7 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          node build.mjs --bump=${{ inputs.bump }}
+          node publisher/build.mjs --bump=${{ inputs.bump }}
           VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           git add Cargo.toml
           git commit -m "chore: release v${VERSION}"
@@ -67,7 +67,7 @@ jobs:
 
       # ── 6. Build WASM ─────────────────────────────────────────────────────────
       - name: Build WASM
-        run: node build.mjs
+        run: node publisher/build.mjs
 
       # ── 7. Publish con provenance ────────────────────────────────────────────
       - name: Publish to npm

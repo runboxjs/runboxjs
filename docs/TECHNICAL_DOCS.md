@@ -164,12 +164,12 @@ cargo bench
 WASM package build:
 
 ```bash
-node build.mjs
+node publisher/build.mjs
 ```
 
 Publish flow:
 
 ```bash
-node build.mjs --bump patch
-node build.mjs --publish
+node publisher/build.mjs --bump patch
+node publisher/build.mjs --publish
 ```
