@@ -1,0 +1,52 @@
+{
+  "name": "runboxjs",
+  "type": "module",
+  "description": "A powerful WebAssembly-powered sandbox runtime for executing code, managing files, and running commands in isolated environments directly in the browser. Execute JavaScript, Python, Git commands, npm packages, and more in a secure, lightweight sandbox.",
+  "keywords": [
+    "wasm", "webassembly", "sandbox", "runtime", "javascript",
+    "isolated-execution", "virtual-filesystem", "git", "npm",
+    "package-manager", "terminal", "code-execution", "browser",
+    "security", "containerization", "code-editor", "playground", "ai-tools"
+  ],
+  "main": "runbox.js",
+  "types": "runbox.d.ts",
+  "exports": {
+    ".": {
+      "import": "./runbox.js",
+      "types": "./runbox.d.ts"
+    }
+  },
+  "files": [
+    "runbox.js",
+    "runbox.d.ts",
+    "runbox_bg.wasm",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": ["./runbox.js"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/owellandry/runbox.git"
+  },
+  "homepage": "https://github.com/owellandry/runbox#readme",
+  "bugs": {
+    "url": "https://github.com/owellandry/runbox/issues",
+    "email": "owellpolanco@gmail.com"
+  },
+  "author": {
+    "name": "owellpolanco",
+    "email": "owellpolanco@gmail.com",
+    "url": "https://github.com/owellandry/runbox"
+  },
+  "license": "MIT",
+  "engines": { "node": ">=16.0.0" },
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/owellandry/runbox"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "browserslist": ["last 2 versions", "not dead", "supports wasm"]
+}

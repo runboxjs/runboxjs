@@ -1,0 +1,3 @@
+[target.x86_64-pc-windows-gnu]
+# Avoid MinGW auto-export overflow when this crate is built as cdylib on Windows GNU.
+rustflags = ["-C", "link-arg=-Wl,--exclude-all-symbols"]

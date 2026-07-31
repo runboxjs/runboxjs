@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build_and_test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy, rustfmt
+
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+
+    - name: Format Check
+      run: cargo fmt -- --check
+
+    - name: Clippy Lints
+      run: cargo clippy -- -D warnings
+
+    - name: Run Native Tests
+      run: cargo test --workspace
+
+    - name: Generate Code Coverage
+      run: |
+        cargo install cargo-tarpaulin
+        cargo tarpaulin --ignore-tests --fail-under=50
+
+  wasm_tests:
+    name: WASM Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Rust & target
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: wasm32-unknown-unknown
+
+    - name: Install wasm-pack
+      run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+    - name: Run Web Tests (Chrome/Firefox headless)
+      run: wasm-pack test --headless --chrome --firefox
+
+  benchmarks:
+    name: Performance Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@nightly
+
+    - name: Run core benchmarks
+      run: cargo bench --bench core_bench

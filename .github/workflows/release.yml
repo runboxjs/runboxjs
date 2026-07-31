@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump type"
+        required: true
+        default: "patch"
+        type: choice
+        options: [patch, minor, major]
+
+# Permisos requeridos para npm provenance
+permissions:
+  contents: write   # crear release en GitHub
+  id-token: write   # firmar provenance OIDC
+
+jobs:
+  release:
+    name: Build & Publish
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: master
+
+      # ── 2. Rust + wasm target ────────────────────────────────────────────────
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      # ── 3. wasm-pack ─────────────────────────────────────────────────────────
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      # ── 4. Node.js ───────────────────────────────────────────────────────────
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org/"
+
+      # ── 5. Bump versión (solo en workflow_dispatch) ───────────────────────────
+      - name: Bump version
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          node build.mjs --bump=${{ inputs.bump }}
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          git add Cargo.toml
+          git commit -m "chore: release v${VERSION}"
+          git tag "v${VERSION}"
+          git push origin HEAD:master --tags
+
+      # ── 6. Build WASM ─────────────────────────────────────────────────────────
+      - name: Build WASM
+        run: node build.mjs
+
+      # ── 7. Publish con provenance ────────────────────────────────────────────
+      - name: Publish to npm
+        run: npm publish --provenance --access public
+        working-directory: pkg
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # ── 8. GitHub Release ─────────────────────────────────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          generate_release_notes: true
+          files: |
+            pkg/runbox_bg.wasm
