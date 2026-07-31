@@ -7,3 +7,4 @@ Cargo.lock
 .log/*
 !.log/.gitkeep
 .tools/
+.cargo/
